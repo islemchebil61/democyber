@@ -1,0 +1,86 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/democyber:latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # PART I - Gitleaks scan (before compilation)
+      - name: Run Gitleaks scan
+        uses: zricethezav/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: results.sarif
+
+      # PART II - Docker build, test and Trivy scan
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: docker build -t $DOCKER_IMAGE_NAME -t democyber:latest .
+
+      - name: Show Docker image details
+        run: docker image ls democyber
+
+      - name: Test Docker image locally
+        run: |
+          docker run -d --name democyber-test -p 8080:8080 $DOCKER_IMAGE_NAME
+          sleep 15
+          docker logs democyber-test
+          curl -f http://localhost:8080 || echo "App not responding"
+          docker stop democyber-test
+          docker rm democyber-test
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: democyber:latest
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+
+      - name: Generate Trivy JSON report
+        if: always()
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: democyber:latest
+          format: 'json'
+          output: 'trivy-report.json'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
+
+      # PART III - Push to Docker Hub
+      - name: Push Docker image
+        run: docker push $DOCKER_IMAGE_NAME
